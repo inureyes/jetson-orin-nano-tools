@@ -216,7 +216,8 @@ extend_partition() {
                 info "ext4 filesystem detected. Online resize is supported."
                 if [[ "$mountpoint" == "/" || "$mountpoint" == "/boot" ]]; then
                     if [[ "$force_resize" != "true" ]]; then
-                        error_exit "Cannot resize root/boot partition while mounted. Use -f flag to force (RISKY) or boot from rescue media."
+                        echo "Cannot resize root/boot partition while mounted. Use -f flag to force (RISKY) or boot from rescue media."
+                        return 1
                     else
                         warning "FORCING resize of mounted $mountpoint partition. This is DANGEROUS!"
                         warning "Make sure you have backups and the system is stable."
@@ -228,7 +229,8 @@ extend_partition() {
                 info "$fstype filesystem detected. Online resize is supported."
                 if [[ "$mountpoint" == "/" || "$mountpoint" == "/boot" ]]; then
                     if [[ "$force_resize" != "true" ]]; then
-                        error_exit "Cannot resize root/boot partition while mounted. Use -f flag to force (RISKY) or boot from rescue media."
+                        echo "Cannot resize root/boot partition while mounted. Use -f flag to force (RISKY) or boot from rescue media."
+                        return 1
                     else
                         warning "FORCING resize of mounted $mountpoint partition. This is DANGEROUS!"
                         warning "Make sure you have backups and the system is stable."
@@ -238,26 +240,30 @@ extend_partition() {
             ext2|ext3)
                 # ext2/3 generally require unmounting
                 if [[ "$mountpoint" == "/" || "$mountpoint" == "/boot" ]]; then
-                    error_exit "Cannot resize $fstype root/boot partition while mounted. Please boot from rescue media."
+                    echo "Cannot resize $fstype root/boot partition while mounted. Please boot from rescue media."
+                    return 1
                 fi
                 info "Attempting to unmount $partition for ext2/3 resize..."
-                umount "$partition" 2>/dev/null || {
+                if ! umount "$partition" 2>/dev/null; then
                     warning "Failed to unmount $partition. Checking for processes using it..."
                     fuser -mv "$partition" 2>/dev/null
-                    error_exit "Cannot unmount $partition. Please manually stop processes using it."
-                }
+                    echo "Cannot unmount $partition. Please manually stop processes using it."
+                    return 1
+                fi
                 ;;
             *)
                 # Unknown filesystem, safer to unmount
                 if [[ "$mountpoint" == "/" || "$mountpoint" == "/boot" ]]; then
-                    error_exit "Cannot resize unknown filesystem on root/boot partition while mounted. Please boot from rescue media."
+                    echo "Cannot resize unknown filesystem on root/boot partition while mounted. Please boot from rescue media."
+                    return 1
                 fi
                 info "Attempting to unmount $partition..."
-                umount "$partition" 2>/dev/null || {
+                if ! umount "$partition" 2>/dev/null; then
                     warning "Failed to unmount $partition. Checking for processes using it..."
                     fuser -mv "$partition" 2>/dev/null
-                    error_exit "Cannot unmount $partition. Please manually stop processes using it."
-                }
+                    echo "Cannot unmount $partition. Please manually stop processes using it."
+                    return 1
+                fi
                 ;;
         esac
     fi
@@ -265,7 +271,10 @@ extend_partition() {
     # Check for swap
     if swapon --show | grep -q "$partition"; then
         info "Disabling swap on $partition..."
-        swapoff "$partition" || error_exit "Failed to disable swap on $partition"
+        if ! swapoff "$partition"; then
+            echo "Failed to disable swap on $partition"
+            return 1
+        fi
     fi
     
     # Show current partition info if verbose
@@ -281,11 +290,14 @@ extend_partition() {
     
     # Use parted to extend partition
     info "Executing partition resize command..."
+    local parted_exit_code
     if [[ "$size" == "100%" || "$size" == "" ]]; then
         if [[ "$verbose" == "true" ]]; then
             parted "$device" resizepart "$part_num" 100%
+            parted_exit_code=$?
         else
             parted "$device" resizepart "$part_num" 100% &>/dev/null
+            parted_exit_code=$?
         fi
     else
         # Get current partition end position
@@ -295,14 +307,16 @@ extend_partition() {
         info "Extending from ${current_end}MB to ${new_end}MB"
         if [[ "$verbose" == "true" ]]; then
             parted "$device" resizepart "$part_num" "${new_end}MB"
+            parted_exit_code=$?
         else
             parted "$device" resizepart "$part_num" "${new_end}MB" &>/dev/null
+            parted_exit_code=$?
         fi
     fi
     
-    local parted_exit_code=$?
     if [[ $parted_exit_code -ne 0 ]]; then
-        error_exit "Failed to extend partition $partition (exit code: $parted_exit_code)"
+        echo "Failed to extend partition $partition (exit code: $parted_exit_code)"
+        return 1
     fi
     
     # Verify the change
@@ -312,6 +326,7 @@ extend_partition() {
     fi
     
     success "Partition extended successfully"
+    return 0
 }
 
 # Estimate filesystem resize time and show it to user
@@ -348,8 +363,10 @@ extend_filesystem() {
         ext2|ext3|ext4)
             # For ext filesystems, check filesystem first
             info "Checking filesystem integrity..."
+            local check_exit_code
             if [[ "$verbose" == "true" ]]; then
                 e2fsck -f "$partition"
+                check_exit_code=$?
             else
                 # Show progress during filesystem check
                 e2fsck -f -C 0 "$partition" 2>/dev/null &
@@ -361,14 +378,24 @@ extend_filesystem() {
                     sleep 1
                 done
                 wait "$check_pid"
+                check_exit_code=$?
                 printf "\n"
+            fi
+            
+            # Check if filesystem check was successful
+            if [[ $check_exit_code -ne 0 && $check_exit_code -ne 1 ]]; then
+                # Exit code 1 is normal for corrected errors
+                echo "Filesystem check failed (exit code: $check_exit_code)"
+                return 1
             fi
             
             # Extend filesystem with progress
             info "Resizing filesystem... This may take several minutes."
+            local resize_exit_code
             if [[ "$verbose" == "true" ]]; then
                 # Use -p flag for progress bar
                 resize2fs -p "$partition"
+                resize_exit_code=$?
             else
                 # Run resize2fs with progress to a log file and show our progress
                 (resize2fs -p "$partition" > /tmp/resize_progress.log 2>&1) &
@@ -392,7 +419,13 @@ extend_filesystem() {
                 done
                 printf "\n"
                 wait "$resize_pid"
+                resize_exit_code=$?
                 rm -f /tmp/resize_progress.log
+            fi
+            
+            if [[ $resize_exit_code -ne 0 ]]; then
+                echo "Failed to resize ext filesystem (exit code: $resize_exit_code)"
+                return 1
             fi
             ;;
         xfs)
@@ -401,16 +434,24 @@ extend_filesystem() {
             mountpoint=$(lsblk -no MOUNTPOINT "$partition" | head -n1)
             if [[ -n "$mountpoint" ]]; then
                 info "Extending XFS filesystem (online resize)..."
+                local xfs_exit_code
                 if [[ "$verbose" == "true" ]]; then
                     xfs_growfs -d "$mountpoint"
+                    xfs_exit_code=$?
                 else
                     # XFS resize is usually very quick
                     show_progress 3 "Extending XFS filesystem"
                     xfs_growfs -d "$mountpoint" &>/dev/null &
                     wait $!
+                    xfs_exit_code=$?
+                fi
+                
+                if [[ $xfs_exit_code -ne 0 ]]; then
+                    echo "Failed to extend XFS filesystem (exit code: $xfs_exit_code)"
+                    return 1
                 fi
             else
-                warning "XFS filesystem needs to be mounted to extend. Please mount and run xfs_growfs manually."
+                echo "XFS filesystem needs to be mounted to extend. Please mount and run xfs_growfs manually."
                 return 1
             fi
             ;;
@@ -420,16 +461,24 @@ extend_filesystem() {
             mountpoint=$(lsblk -no MOUNTPOINT "$partition" | head -n1)
             if [[ -n "$mountpoint" ]]; then
                 info "Extending Btrfs filesystem (online resize)..."
+                local btrfs_exit_code
                 if [[ "$verbose" == "true" ]]; then
                     btrfs filesystem resize max "$mountpoint"
+                    btrfs_exit_code=$?
                 else
                     # Btrfs resize is usually very quick
                     show_progress 2 "Extending Btrfs filesystem"
                     btrfs filesystem resize max "$mountpoint" &>/dev/null &
                     wait $!
+                    btrfs_exit_code=$?
+                fi
+                
+                if [[ $btrfs_exit_code -ne 0 ]]; then
+                    echo "Failed to extend Btrfs filesystem (exit code: $btrfs_exit_code)"
+                    return 1
                 fi
             else
-                warning "Btrfs filesystem needs to be mounted to extend. Please mount and run btrfs resize manually."
+                echo "Btrfs filesystem needs to be mounted to extend. Please mount and run btrfs resize manually."
                 return 1
             fi
             ;;
@@ -440,11 +489,8 @@ extend_filesystem() {
             ;;
     esac
     
-    if [[ $? -eq 0 ]]; then
-        success "Filesystem extended successfully"
-    else
-        error_exit "Failed to extend filesystem"
-    fi
+    success "Filesystem extended successfully"
+    return 0
 }
 
 # Parse and validate size
@@ -573,12 +619,16 @@ main() {
     
     # Perform partition extension with force flag
     echo
-    extend_partition "$device" "$main_partition" "$size" "$verbose" "$force_resize"
+    if ! extend_partition "$device" "$main_partition" "$size" "$verbose" "$force_resize"; then
+        error_exit "Partition extension failed. Aborting script."
+    fi
     
     # Extend filesystem
-    extend_filesystem "$main_partition" "$fstype" "$verbose"
+    if ! extend_filesystem "$main_partition" "$fstype" "$verbose"; then
+        error_exit "Filesystem extension failed. Partition was resized but filesystem extension failed."
+    fi
     
-    # Show results
+    # Show results only if both operations succeeded
     echo
     success "Partition extension completed successfully!"
     
