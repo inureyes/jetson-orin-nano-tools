@@ -293,10 +293,11 @@ extend_partition() {
     local parted_exit_code
     if [[ "$size" == "100%" || "$size" == "" ]]; then
         if [[ "$verbose" == "true" ]]; then
-            parted "$device" resizepart "$part_num" 100%
+            # Use --script for non-interactive mode
+            parted --script "$device" resizepart "$part_num" 100%
             parted_exit_code=$?
         else
-            parted "$device" resizepart "$part_num" 100% &>/dev/null
+            parted --script "$device" resizepart "$part_num" 100% &>/dev/null
             parted_exit_code=$?
         fi
     else
@@ -306,10 +307,10 @@ extend_partition() {
         local new_end=$((current_end + ${size%MB}))
         info "Extending from ${current_end}MB to ${new_end}MB"
         if [[ "$verbose" == "true" ]]; then
-            parted "$device" resizepart "$part_num" "${new_end}MB"
+            parted --script "$device" resizepart "$part_num" "${new_end}MB"
             parted_exit_code=$?
         else
-            parted "$device" resizepart "$part_num" "${new_end}MB" &>/dev/null
+            parted --script "$device" resizepart "$part_num" "${new_end}MB" &>/dev/null
             parted_exit_code=$?
         fi
     fi
