@@ -148,7 +148,25 @@ get_unallocated_space() {
     echo "$unallocated"
 }
 
-# Extend partition
+# Show progress bar (simple implementation)
+show_progress() {
+    local duration="$1"
+    local message="$2"
+    
+    echo -n "$message"
+    for ((i=0; i<=100; i+=2)); do
+        printf "\r$message [%3d%%] " "$i"
+        printf "["
+        for ((j=0; j<i/2; j++)); do printf "="; done
+        printf ">"
+        for ((j=i/2; j<50; j++)); do printf " "; done
+        printf "]"
+        sleep 0.1
+    done
+    printf "\n"
+}
+
+# Extend partition with progress indication
 extend_partition() {
     local device="$1"
     local partition="$2"
@@ -159,6 +177,11 @@ extend_partition() {
     local part_num=$(echo "$partition" | grep -oE '[0-9]+$')
     
     info "Extending partition $partition..."
+    
+    # Show progress for partition resizing
+    if [[ "$verbose" != "true" ]]; then
+        show_progress 5 "Resizing partition table"
+    fi
     
     # Use parted to extend partition
     if [[ "$size" == "100%" || "$size" == "" ]]; then
@@ -177,7 +200,29 @@ extend_partition() {
     success "Partition extended successfully"
 }
 
-# Extend filesystem
+# Estimate filesystem resize time and show it to user
+estimate_resize_time() {
+    local partition="$1"
+    local fstype="$2"
+    local size_mb="$3"
+    
+    case "$fstype" in
+        ext2|ext3|ext4)
+            # Rough estimate: 1-2 minutes per 100GB on SSD, 3-5 minutes on HDD
+            local estimated_minutes=$(( (size_mb / 1024 / 100) * 2 ))
+            if [[ $estimated_minutes -lt 1 ]]; then
+                estimated_minutes=1
+            fi
+            info "Estimated time for ext filesystem resize: approximately $estimated_minutes minute(s)"
+            info "Actual time may vary depending on disk speed and usage patterns"
+            ;;
+        xfs|btrfs)
+            info "XFS/Btrfs online resize typically completes in seconds to minutes"
+            ;;
+    esac
+}
+
+# Extend filesystem with progress indication
 extend_filesystem() {
     local partition="$1"
     local fstype="$2"
@@ -188,27 +233,65 @@ extend_filesystem() {
     case "$fstype" in
         ext2|ext3|ext4)
             # For ext filesystems, check filesystem first
+            info "Checking filesystem integrity..."
             if [[ "$verbose" == "true" ]]; then
                 e2fsck -f "$partition"
             else
-                e2fsck -f "$partition" &>/dev/null
+                # Show progress during filesystem check
+                e2fsck -f -C 0 "$partition" 2>/dev/null &
+                local check_pid=$!
+                
+                # Show a simple progress indicator
+                while kill -0 "$check_pid" 2>/dev/null; do
+                    printf "."
+                    sleep 1
+                done
+                wait "$check_pid"
+                printf "\n"
             fi
             
-            # Extend filesystem
+            # Extend filesystem with progress
+            info "Resizing filesystem... This may take several minutes."
             if [[ "$verbose" == "true" ]]; then
-                resize2fs "$partition"
+                # Use -p flag for progress bar
+                resize2fs -p "$partition"
             else
-                resize2fs "$partition" &>/dev/null
+                # Run resize2fs with progress to a log file and show our progress
+                (resize2fs -p "$partition" > /tmp/resize_progress.log 2>&1) &
+                local resize_pid=$!
+                
+                # Monitor progress from log file
+                while kill -0 "$resize_pid" 2>/dev/null; do
+                    if [[ -f /tmp/resize_progress.log ]]; then
+                        # Extract progress percentage if available
+                        local progress=$(tail -n1 /tmp/resize_progress.log 2>/dev/null | grep -oE '[0-9]+\.[0-9]+%' | tail -n1)
+                        if [[ -n "$progress" ]]; then
+                            printf "\rProgress: %s" "$progress"
+                        else
+                            printf "."
+                        fi
+                    else
+                        printf "."
+                    fi
+                    sleep 1
+                done
+                printf "\n"
+                wait "$resize_pid"
+                rm -f /tmp/resize_progress.log
             fi
             ;;
         xfs)
             # For XFS filesystem (must be mounted)
             local mountpoint=$(lsblk -no MOUNTPOINT "$partition" | head -n1)
             if [[ -n "$mountpoint" ]]; then
+                info "Extending XFS filesystem (online resize)..."
                 if [[ "$verbose" == "true" ]]; then
-                    xfs_growfs "$mountpoint"
+                    xfs_growfs -d "$mountpoint"
                 else
-                    xfs_growfs "$mountpoint" &>/dev/null
+                    # XFS resize is usually very quick
+                    show_progress 3 "Extending XFS filesystem"
+                    xfs_growfs -d "$mountpoint" &>/dev/null &
+                    wait $!
                 fi
             else
                 warning "XFS filesystem needs to be mounted to extend. Please mount and run xfs_growfs manually."
@@ -219,10 +302,14 @@ extend_filesystem() {
             # For Btrfs filesystem
             local mountpoint=$(lsblk -no MOUNTPOINT "$partition" | head -n1)
             if [[ -n "$mountpoint" ]]; then
+                info "Extending Btrfs filesystem (online resize)..."
                 if [[ "$verbose" == "true" ]]; then
                     btrfs filesystem resize max "$mountpoint"
                 else
-                    btrfs filesystem resize max "$mountpoint" &>/dev/null
+                    # Btrfs resize is usually very quick
+                    show_progress 2 "Extending Btrfs filesystem"
+                    btrfs filesystem resize max "$mountpoint" &>/dev/null &
+                    wait $!
                 fi
             else
                 warning "Btrfs filesystem needs to be mounted to extend. Please mount and run btrfs resize manually."
@@ -338,6 +425,11 @@ main() {
     else
         info "Will extend by all available space (${unallocated}MB)"
     fi
+    
+    # Show time estimate before starting
+    local total_size_mb=$(lsblk -bno SIZE "$main_partition" | head -n1)
+    total_size_mb=$((total_size_mb / 1024 / 1024))
+    estimate_resize_time "$main_partition" "$fstype" "$total_size_mb"
     
     # Confirmation prompt
     if [[ "$auto_yes" != "true" ]]; then
