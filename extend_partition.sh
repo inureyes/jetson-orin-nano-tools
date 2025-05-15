@@ -133,7 +133,8 @@ detect_main_partition() {
 # Detect filesystem type
 detect_filesystem() {
     local partition="$1"
-    local fstype=$(lsblk -no FSTYPE "$partition" 2>/dev/null)
+    local fstype
+    fstype=$(lsblk -no FSTYPE "$partition" 2>/dev/null)
     
     if [[ -z "$fstype" ]]; then
         warning "Could not detect filesystem type for $partition"
@@ -146,8 +147,10 @@ detect_filesystem() {
 # Calculate unallocated space
 get_unallocated_space() {
     local device="$1"
-    local info=$(parted "$device" unit MB print free 2>/dev/null)
-    local unallocated=$(echo "$info" | awk '/Free Space/ {gsub(/MB/, "", $3); total+=$3} END {print total+0}')
+    local info
+    local unallocated
+    info=$(parted "$device" unit MB print free 2>/dev/null)
+    unallocated=$(echo "$info" | awk '/Free Space/ {gsub(/MB/, "", $3); total+=$3} END {print total+0}')
     echo "$unallocated"
 }
 
@@ -175,37 +178,11 @@ extend_partition() {
     local partition="$2"
     local size="$3"
     local verbose="$4"
-    
-    # Extract partition number more reliably using lsblk
-    local part_num=$(lsblk -no NAME "$partition" | sed 's/.*[^0-9]\([0-9]\+\)$/\1/')
-    
-    # Fallback method for edge cases
-    if [[ -z "$part_num" ]]; then
-        if [[ "$partition" =~ p[0-9]+$ ]]; then
-            # For devices like /dev/nvme0n1p1, /dev/mmcblk0p1
-            part_num=$(echo "$partition" | sed 's/.*p\([0-9]\+\)$/\1/')
-        else
-            # For devices like /dev/sdb1, /dev/sdc2
-            part_num=$(echo "$partition" | sed 's/.*[^0-9]\([0-9]\+\)$/\1/')
-        fi
-    fi
-    
-    if [[ -z "$part_num" ]]; then
-        error_exit "Could not extract partition number from $partition"
-    fi
-    
-    info "Extending partition $partition (partition #$part_num)..."
-    
-# Extend partition with progress indication
-extend_partition() {
-    local device="$1"
-    local partition="$2"
-    local size="$3"
-    local verbose="$4"
     local force_resize="$5"
     
     # Extract partition number more reliably using lsblk
-    local part_num=$(lsblk -no NAME "$partition" | sed 's/.*[^0-9]\([0-9]\+\)$/\1/')
+    local part_num
+    part_num=$(lsblk -no NAME "$partition" | sed 's/.*[^0-9]\([0-9]\+\)$/\1/')
     
     # Fallback method for edge cases
     if [[ -z "$part_num" ]]; then
@@ -225,12 +202,14 @@ extend_partition() {
     info "Extending partition $partition (partition #$part_num)..."
     
     # Check if partition is mounted
-    local mountpoint=$(lsblk -no MOUNTPOINT "$partition" 2>/dev/null)
+    local mountpoint
+    mountpoint=$(lsblk -no MOUNTPOINT "$partition" 2>/dev/null)
     if [[ -n "$mountpoint" ]]; then
         warning "Partition $partition is mounted at $mountpoint"
         
         # Check filesystem type for online resize capability
-        local fstype=$(detect_filesystem "$partition")
+        local fstype
+        fstype=$(detect_filesystem "$partition")
         case "$fstype" in
             ext4)
                 # ext4 supports online resize
@@ -399,7 +378,8 @@ extend_filesystem() {
                 while kill -0 "$resize_pid" 2>/dev/null; do
                     if [[ -f /tmp/resize_progress.log ]]; then
                         # Extract progress percentage if available
-                        local progress=$(tail -n1 /tmp/resize_progress.log 2>/dev/null | grep -oE '[0-9]+\.[0-9]+%' | tail -n1)
+                        local progress
+                        progress=$(tail -n1 /tmp/resize_progress.log 2>/dev/null | grep -oE '[0-9]+\.[0-9]+%' | tail -n1)
                         if [[ -n "$progress" ]]; then
                             printf "\rProgress: %s" "$progress"
                         else
@@ -417,7 +397,8 @@ extend_filesystem() {
             ;;
         xfs)
             # For XFS filesystem (must be mounted)
-            local mountpoint=$(lsblk -no MOUNTPOINT "$partition" | head -n1)
+            local mountpoint
+            mountpoint=$(lsblk -no MOUNTPOINT "$partition" | head -n1)
             if [[ -n "$mountpoint" ]]; then
                 info "Extending XFS filesystem (online resize)..."
                 if [[ "$verbose" == "true" ]]; then
@@ -435,7 +416,8 @@ extend_filesystem() {
             ;;
         btrfs)
             # For Btrfs filesystem
-            local mountpoint=$(lsblk -no MOUNTPOINT "$partition" | head -n1)
+            local mountpoint
+            mountpoint=$(lsblk -no MOUNTPOINT "$partition" | head -n1)
             if [[ -n "$mountpoint" ]]; then
                 info "Extending Btrfs filesystem (online resize)..."
                 if [[ "$verbose" == "true" ]]; then
@@ -535,9 +517,12 @@ main() {
     # Collect device information
     info "Analyzing device $device..."
     
-    local main_partition=$(detect_main_partition "$device")
-    local fstype=$(detect_filesystem "$main_partition")
-    local unallocated=$(get_unallocated_space "$device")
+    local main_partition
+    local fstype
+    local unallocated
+    main_partition=$(detect_main_partition "$device")
+    fstype=$(detect_filesystem "$main_partition")
+    unallocated=$(get_unallocated_space "$device")
     
     if [[ "$verbose" == "true" ]]; then
         info "Main partition: $main_partition"
@@ -553,7 +538,8 @@ main() {
     
     # Validate size
     if [[ -n "$size" ]]; then
-        local parsed_size=$(parse_size "$size" "$unallocated")
+        local parsed_size
+        parsed_size=$(parse_size "$size" "$unallocated")
         local size_mb=${parsed_size%MB}
         
         if [[ "$size_mb" -gt "$unallocated" ]]; then
