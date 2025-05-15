@@ -175,6 +175,10 @@ extend_partition() {
     
     # Extract partition number
     local part_num=$(echo "$partition" | grep -oE '[0-9]+$')
+    if [[ -z "$part_num" ]]; then
+        error_exit "Could not extract partition number from $partition"
+    fi
+}
 
 # Estimate filesystem resize time and show it to user
 estimate_resize_time() {
@@ -440,7 +444,7 @@ main() {
 }
 
 # Execute script
-main "$@")
+main "$@"
     
     info "Extending partition $partition..."
     
