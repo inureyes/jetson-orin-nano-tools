@@ -43,18 +43,21 @@ OPTIONS:
                 Default: use all available unallocated space
     -y          Skip confirmation prompt (auto-yes)
     -v          Verbose output
+    -f          Force resize even for mounted root/boot partitions (DANGEROUS)
 
 EXAMPLES:
     $0 /dev/sdb                    # Extend to use all available space
     $0 -s 10G /dev/sdb            # Extend by 10 GB
     $0 -s 50% /dev/sdb            # Extend by 50% of unallocated space
     $0 -y /dev/sdb                # Extend automatically without confirmation
+    $0 -f /dev/sdb                # Force resize even for root partition (RISKY)
 
 NOTES:
     - This script requires root privileges
     - Always backup your data before resizing partitions
     - The script automatically detects the main partition to extend
     - Supports both GPT and MBR partition tables
+    - Use -f flag only if you understand the risks for mounted root/boot partitions
 
 EOF
 }
@@ -193,20 +196,91 @@ extend_partition() {
     
     info "Extending partition $partition (partition #$part_num)..."
     
+# Extend partition with progress indication
+extend_partition() {
+    local device="$1"
+    local partition="$2"
+    local size="$3"
+    local verbose="$4"
+    local force_resize="$5"
+    
+    # Extract partition number more reliably using lsblk
+    local part_num=$(lsblk -no NAME "$partition" | sed 's/.*[^0-9]\([0-9]\+\)$/\1/')
+    
+    # Fallback method for edge cases
+    if [[ -z "$part_num" ]]; then
+        if [[ "$partition" =~ p[0-9]+$ ]]; then
+            # For devices like /dev/nvme0n1p1, /dev/mmcblk0p1
+            part_num=$(echo "$partition" | sed 's/.*p\([0-9]\+\)$/\1/')
+        else
+            # For devices like /dev/sdb1, /dev/sdc2
+            part_num=$(echo "$partition" | sed 's/.*[^0-9]\([0-9]\+\)$/\1/')
+        fi
+    fi
+    
+    if [[ -z "$part_num" ]]; then
+        error_exit "Could not extract partition number from $partition"
+    fi
+    
+    info "Extending partition $partition (partition #$part_num)..."
+    
     # Check if partition is mounted
     local mountpoint=$(lsblk -no MOUNTPOINT "$partition" 2>/dev/null)
     if [[ -n "$mountpoint" ]]; then
         warning "Partition $partition is mounted at $mountpoint"
-        if [[ "$mountpoint" == "/" || "$mountpoint" == "/boot" ]]; then
-            warning "Cannot resize root or boot partition while mounted. Please boot from rescue media."
-            return 1
-        fi
-        info "Attempting to unmount $partition..."
-        umount "$partition" 2>/dev/null || {
-            warning "Failed to unmount $partition. Checking for processes using it..."
-            fuser -mv "$partition" 2>/dev/null
-            error_exit "Cannot unmount $partition. Please manually stop processes using it."
-        }
+        
+        # Check filesystem type for online resize capability
+        local fstype=$(detect_filesystem "$partition")
+        case "$fstype" in
+            ext4)
+                # ext4 supports online resize
+                info "ext4 filesystem detected. Online resize is supported."
+                if [[ "$mountpoint" == "/" || "$mountpoint" == "/boot" ]]; then
+                    if [[ "$force_resize" != "true" ]]; then
+                        error_exit "Cannot resize root/boot partition while mounted. Use -f flag to force (RISKY) or boot from rescue media."
+                    else
+                        warning "FORCING resize of mounted $mountpoint partition. This is DANGEROUS!"
+                        warning "Make sure you have backups and the system is stable."
+                    fi
+                fi
+                ;;
+            xfs|btrfs)
+                # XFS and Btrfs support online resize
+                info "$fstype filesystem detected. Online resize is supported."
+                if [[ "$mountpoint" == "/" || "$mountpoint" == "/boot" ]]; then
+                    if [[ "$force_resize" != "true" ]]; then
+                        error_exit "Cannot resize root/boot partition while mounted. Use -f flag to force (RISKY) or boot from rescue media."
+                    else
+                        warning "FORCING resize of mounted $mountpoint partition. This is DANGEROUS!"
+                        warning "Make sure you have backups and the system is stable."
+                    fi
+                fi
+                ;;
+            ext2|ext3)
+                # ext2/3 generally require unmounting
+                if [[ "$mountpoint" == "/" || "$mountpoint" == "/boot" ]]; then
+                    error_exit "Cannot resize $fstype root/boot partition while mounted. Please boot from rescue media."
+                fi
+                info "Attempting to unmount $partition for ext2/3 resize..."
+                umount "$partition" 2>/dev/null || {
+                    warning "Failed to unmount $partition. Checking for processes using it..."
+                    fuser -mv "$partition" 2>/dev/null
+                    error_exit "Cannot unmount $partition. Please manually stop processes using it."
+                }
+                ;;
+            *)
+                # Unknown filesystem, safer to unmount
+                if [[ "$mountpoint" == "/" || "$mountpoint" == "/boot" ]]; then
+                    error_exit "Cannot resize unknown filesystem on root/boot partition while mounted. Please boot from rescue media."
+                fi
+                info "Attempting to unmount $partition..."
+                umount "$partition" 2>/dev/null || {
+                    warning "Failed to unmount $partition. Checking for processes using it..."
+                    fuser -mv "$partition" 2>/dev/null
+                    error_exit "Cannot unmount $partition. Please manually stop processes using it."
+                }
+                ;;
+        esac
     fi
     
     # Check for swap
@@ -415,9 +489,10 @@ main() {
     local size=""
     local auto_yes=false
     local verbose=false
+    local force_resize=false
     
     # Parse options
-    while getopts "hs:yv" opt; do
+    while getopts "hs:yvf" opt; do
         case $opt in
             h)
                 show_usage
@@ -431,6 +506,9 @@ main() {
                 ;;
             v)
                 verbose=true
+                ;;
+            f)
+                force_resize=true
                 ;;
             \?)
                 echo "Invalid option: -$OPTARG" >&2
@@ -507,9 +585,9 @@ main() {
         fi
     fi
     
-    # Perform partition extension
+    # Perform partition extension with force flag
     echo
-    extend_partition "$device" "$main_partition" "$size" "$verbose"
+    extend_partition "$device" "$main_partition" "$size" "$verbose" "$force_resize"
     
     # Extend filesystem
     extend_filesystem "$main_partition" "$fstype" "$verbose"
